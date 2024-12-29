@@ -4,6 +4,7 @@ import requests
 import argparse
 import csv
 import concurrent.futures
+import logging
 
 # Default payloads
 default_payloads = [
@@ -66,40 +67,54 @@ def make_request(url, param, payload, method='GET', cookies=None):
     if cookies:
         session.cookies.update(cookies)
 
-    if method == 'POST':
-        return session.post(url, data={param: payload})
-    elif method == 'PUT':
-        return session.put(url, data={param: payload})
-    elif method == 'DELETE':
-        return session.delete(url, data={param: payload})
-    else:
-        return session.get(url, params={param: payload})
+    try:
+        if method == 'POST':
+            return session.post(url, data={param: payload})
+        elif method == 'PUT':
+            return session.put(url, data={param: payload})
+        elif method == 'DELETE':
+            return session.delete(url, data={param: payload})
+        else:
+            return session.get(url, params={param: payload})
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Error with request to {url}: {e}")
+        return None
 
 def test_sql_injection(url, param, payloads, method='GET', cookies=None):
     """Test for SQL Injection vulnerabilities."""
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         future_to_payload = {executor.submit(make_request, url, param, payload, method, cookies): payload for payload in payloads}
         for future in concurrent.futures.as_completed(future_to_payload):
             payload = future_to_payload[future]
             try:
                 response = future.result()
-                if is_vulnerable(response):
-                    print(f"Possible SQL Injection vulnerability detected with payload: {payload}")
-                    return True
+                if response and response.status_code == 200:
+                    if is_vulnerable(response):
+                        results.append((payload, "Vulnerable"))
+                        print(f"Possible SQL Injection vulnerability detected with payload: {payload}")
+                    else:
+                        results.append((payload, "Not Vulnerable"))
+                else:
+                    results.append((payload, "Request Failed"))
             except Exception as exc:
-                print(f'Payload {payload} generated an exception: {exc}')
-    return False
+                logging.error(f'Payload {payload} generated an exception: {exc}')
+                results.append((payload, f"Exception: {exc}"))
+    return results
 
 def export_results(results, filename='results.csv'):
     """Export results to a CSV file."""
     with open(filename, 'w', newline='') as csvfile:
-        fieldnames = ['URL', 'Parameter', 'Payload', 'Vulnerable']
+        fieldnames = ['Payload', 'Vulnerability']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
         for result in results:
-            writer.writerow(result)
+            writer.writerow({'Payload': result[0], 'Vulnerability': result[1]})
 
 def main():
+    # Set up logging for debugging and progress
+    logging.basicConfig(level=logging.INFO)
+
     # Custom startup message
     print("██████╗░██╗░░░░░██╗███╗░░██╗██████╗░███╗░░░███╗░█████╗░░░███╗░░██████╗░███████╗███╗░░██╗")
     print("██╔══██╗██║░░░░░██║████╗░██║██╔══██╗████╗░████║██╔══██╗░████║░░██╔══██╗██╔════╝████╗░██║")
@@ -136,25 +151,12 @@ def main():
 
     print(f"Testing {url} for SQL Injection vulnerabilities on parameter '{param}' with method '{method}'...")
 
-    results = []
-    if test_sql_injection(url, param, payloads, method, cookies):
-        print("The site is vulnerable to SQL Injection.")
-        while True:
-            option = input("Do you want to test more injections? (y/n): ").strip().lower()
-            if option == 'n':
-                break
-            elif option == 'y':
-                custom_payload = input("Enter the SQL injection to test: ").strip()
-                if test_sql_injection(url, param, [custom_payload], method, cookies):
-                    print(f"The custom payload '{custom_payload}' is vulnerable.")
-                    if args.save_payload:
-                        with open(args.save_payload, 'a') as file:
-                            file.write(custom_payload + '\n')
-                        print(f"Payload '{custom_payload}' saved to {args.save_payload}.")
-                else:
-                    print(f"The custom payload '{custom_payload}' is not vulnerable.")
-            else:
-                print("Invalid option. Please enter 'y' or 'n'.")
+    results = test_sql_injection(url, param, payloads, method, cookies)
+
+    if results:
+        print("SQL Injection test completed. Results:")
+        for result in results:
+            print(f"Payload: {result[0]} | Vulnerability: {result[1]}")
     else:
         print("No SQL Injection vulnerabilities detected.")
 
